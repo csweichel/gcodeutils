@@ -15,6 +15,11 @@ optparse = OptionParser.new do|opts|
     options[:first] = first.split("x").map {|p| p.to_f }
   end
 
+  options[:border] = nil
+  opts.on( '-b', '--border DIM', 'Marks the dimensions of the board with a few holes, format [XX]x[YY] [mm] - can not be used in conjunction with --first' ) do |dim|
+    options[:border] = dim.split("x").map {|p| p.to_f }
+  end
+
   options[:milToMM] = false
   opts.on( '-m', '--mil2mm', 'Translate units from MIL to MM' ) do
     options[:milToMM] = true
@@ -72,7 +77,13 @@ if ARGV.length < 2 then
    exit 
 end
 
+if !options[:border].nil? && options[:first] != [0, 0] then
+  puts "WARNING: --border and --first can not be used together. Ignoring --border"
+  options[:border] = nil
+end
 
+
+BSPACING = 2
 I = options[:first]
 S = options[:start]
 
@@ -86,11 +97,25 @@ holes = excellon.select {|l| l.include?("X") }.map {|p| p.gsub("X", "").split("Y
 # mill to mm
 holes = holes.map {|p| p.map {|e| e * 0.00254 } } if options[:milToMM]
 
+# check units
+STDERR.puts "WARNING: drilling dimensions are very big. Did you forget to convert to mm?" if holes.flatten.any? {|e| e > 1000 }
+
 # verbose
 puts "holes read:\n#{holes.map {|s| s.join("x") }.join("\t")}\n" if options[:verbose]
 
 # first point
 ghles = holes.map {|p| [p[0] - I[0], p[1] - I[1]] }
+
+# border
+unless options[:border].nil?
+  width,height = options[:border]
+  ghles = ghles + [
+    [0, 0 + BSPACING], [0, 0], [0 + BSPACING, 0],  
+    [width - BSPACING, 0], [width, 0], [width, 0 + BSPACING], 
+    [width, height - BSPACING], [width, height], [width - BSPACING, height], 
+    [0 + BSPACING, height], [0, height], [0, height - BSPACING]
+  ]
+end
 
 # rotate
 ghles = holes.map {|p| 
