@@ -1,57 +1,61 @@
 #!/usr/bin/ruby
 
+require 'gcoder'
+include GCoder
+
 if ARGV.length < 4
-	puts "usage: #{__FILE__} <infile> <originalZ> <targetZ> <zStep> [<outfile>]"
+	puts "usage: #{__FILE__} <infile> <travelZ> <targetZ> <zStep> [<outfile>]"
 	exit
 end
 
-$stderr.puts """
-BE AWARE: This script can only handle continuous milling paths. Any non-
-continuous path will be milled as if it was continuous, meaning that any
-gap in the path will be ignored.
+infile, travelZ, targetZ, zStep = ARGV
 
-THIS CAN DESTROY YOUR BOARD.
-Be sure to check the resulting gCode before using it.
-"""
+prog = Parser.new.parse File.new(infile).readlines.join
 
-infile, originalZ, targetZ, zStep = ARGV
-targetZ = targetZ.to_f
-zStep = zStep.to_f
+TRAVEL_HEIGHT = travelZ.to_f
+CUTTING_HEIGHT = targetZ.to_f
+STEP_HEIGHT = zStep.to_f
 
-script = File.new(infile).readlines
-	.map {|line| line.strip }
-
-block = script.inject([false, []]) do |m,e|
-	in_block, result = m
-	
-	cmd,*args = e.split(" ")
-	in_block = true if cmd == "G01" and args.first == "Z#{originalZ}"
-	if in_block
-		if cmd == "G00"
-			in_block = false
-		else
-			result << e
-		end
+# identify milling section
+milling_section_mark = prog.map_with_context do |cmd, ctx|
+	if cmd.is_a? GCode::MoveRapid and cmd.position[2] == TRAVEL_HEIGHT
+		ctx[:sec] = :rapid
+	elsif cmd.is_a? GCode::MoveByFeedrate
+		ctx[:sec] = :feed
+	elsif cmd.is_a? GCode::MoveRapid and ctx[:sec] == :feed
+		ctx[:sec] = nil
 	end
 
-	[ in_block, result ]
-end.last
+	ctx[:sec] ? true : false
+end.first
+milling_section = prog.zip(milling_section_mark).select {|cmd, mark| mark }.map {|cmd, mark| cmd }
 
-if block.empty? 
-	candidates = script.select {|r| cmd,*args=r.split(" "); cmd == "G01" and args.first[0...1] == "Z"}.map {|r| r.split(" ")[1][1..-1] }
-	puts "No milling block found. Make sure originalZ is correct (was set to #{originalZ}, candidates are #{candidates.join(" ")})"
-	exit
-end
- 	
-replacement = (1..(targetZ / zStep).ceil.abs).map do |i|
-	depth = (targetZ < 0 ? -1 : 1) * zStep * i
-	["(begin mill)"] + block.map {|r| r.gsub("Z#{originalZ}", "Z#{depth}") }
+# replicate section to create rounds
+milling_prog = (1..(CUTTING_HEIGHT / STEP_HEIGHT).abs.ceil).to_a.map do |s|
+	depth = (CUTTING_HEIGHT < 0 ? -1 : 1) * s * STEP_HEIGHT
+	milling_section.map do |cmd| 
+		if cmd.position.last == CUTTING_HEIGHT and cmd.is_a? GCode::MoveByFeedrate
+			GCode::MoveByFeedrate.new(cmd.code, { :Z => depth, :F => cmd.feedrate })
+		else
+			cmd
+		end
+	end
 end.flatten
 
-result = script.join("\n").gsub(block.join("\n"), replacement.join("\n"))
+# replace original section with new milling program
+result = prog.zip(milling_section_mark).each_with_object({:repl => false}).map do |cmdAndMark, state|
+	if cmdAndMark.last and not state[:repl]
+		state[:repl] = true
+		milling_prog
+	elsif not cmdAndMark.last
+		cmdAndMark.first
+	end
+end
 
+# output it all
+out = result.flatten.compact.join("\n")
 if ARGV.length > 4
-	File.open(ARGV.last, "w") {|f| f.puts result }
+	File.open(ARGV.last, "w") {|f| f.puts out }
 else
-	puts result
+	puts out
 end
